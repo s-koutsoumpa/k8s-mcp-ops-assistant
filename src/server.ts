@@ -124,24 +124,20 @@ export function createMcpServer() {
   // ANALYSIS TOOLS
   // -------------------------
 
-  server.tool(
-    "analyze_deployment",
-    {
-      name: z.string(),
-      namespace: z.string().default("default"),
-    },
-    async ({ name, namespace }: { name: string; namespace: string }) => {
-      const deployment = await inspectDeployment(name, namespace);
-      const pods = await inspectPods(namespace);
-      const events = await inspectEvents(namespace);
+server.tool(
+  "analyze_deployment",
+  {
+    name: z.string(),
+    namespace: z.string().default("default"),
+  },
+  async ({ name, namespace }: { name: string; namespace: string }) => {
+    const result = await analyzeDeployment(namespace, name);
 
-      const result = analyzeDeployment({ deployment, pods, events });
-
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
-    }
-  );
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  }
+);
 
   server.tool(
     "analyze_probes",
