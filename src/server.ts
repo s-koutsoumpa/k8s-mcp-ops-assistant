@@ -32,10 +32,6 @@ export function createMcpServer() {
     version: "1.0.0",
   });
 
-  // -------------------------
-  // READ-ONLY TOOLS
-  // -------------------------
-
   server.tool(
     "list_deployments",
     { namespace: z.string().default("default") },
@@ -158,10 +154,6 @@ export function createMcpServer() {
     })
   );
 
-  // -------------------------
-  // ANALYSIS TOOLS
-  // -------------------------
-
   server.tool(
     "analyze_deployment",
     {
@@ -222,10 +214,6 @@ export function createMcpServer() {
       };
     }
   );
-
-  // -------------------------
-  // WRITE ACTIONS
-  // -------------------------
 
   server.tool(
     "execute_action",

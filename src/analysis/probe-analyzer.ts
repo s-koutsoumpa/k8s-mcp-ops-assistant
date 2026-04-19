@@ -21,7 +21,6 @@ export function analyzeProbes(input: {
 
   const findings: any[] = [];
 
-  // Check each container and detect missing probes
   for (const container of probeInfo) {
     if (!container.readinessProbe) {
       findings.push({
@@ -55,7 +54,6 @@ export function analyzeProbes(input: {
     }
   }
 
-  // Look for warning events related to probes
   const warningEvents = events.filter((e) => e.type === "Warning");
 
   const probeFailures = warningEvents.filter((e) =>
@@ -71,7 +69,6 @@ export function analyzeProbes(input: {
     });
   }
 
-  // Run profile-based tuning logic
   const smartTuning = suggestSmartProbes({
     deploymentName,
     probeInfo,
@@ -87,8 +84,6 @@ export function analyzeProbes(input: {
   };
 }
 
-// This function selects a probe profile based on observed behavior
-// and then builds probe config from that profile.
 export function suggestSmartProbes(params: {
   deploymentName: string;
   probeInfo: any[];
@@ -110,7 +105,6 @@ export function suggestSmartProbes(params: {
     if (c.startupProbe) hasStartup = true;
   }
 
-  // Count restarts
   let totalRestarts = 0;
   for (const pod of pods) {
     for (const cs of pod.status?.containerStatuses ?? []) {
@@ -118,7 +112,6 @@ export function suggestSmartProbes(params: {
     }
   }
 
-  // Read event messages
   const messages = events.map((e) =>
     `${e.reason ?? ""} ${e.message ?? ""}`.toLowerCase()
   );
@@ -131,12 +124,10 @@ export function suggestSmartProbes(params: {
     m.includes("liveness probe failed")
   );
 
-  // Missing probe findings
   if (!hasReadiness) findings.push("Missing readiness probe");
   if (!hasLiveness) findings.push("Missing liveness probe");
   if (!hasStartup) findings.push("Missing startup probe");
 
-  // Select profile
   const profile = selectProbeProfile({
     hasReadiness,
     hasLiveness,
@@ -174,7 +165,6 @@ export function suggestSmartProbes(params: {
   };
 }
 
-// Decide which profile matches the workload behavior
 function selectProbeProfile(params: {
   hasReadiness: boolean;
   hasLiveness: boolean;
@@ -191,26 +181,21 @@ function selectProbeProfile(params: {
     livenessFailures,
   } = params;
 
-  // Strong instability signals
   if (livenessFailures || totalRestarts >= 3) {
     return "unstable";
   }
 
-  // Looks like startup / readiness delay
   if (readinessFailures || totalRestarts > 0) {
     return "slow_start";
   }
 
-  // Missing probes but no strong instability
   if (!hasReadiness || !hasLiveness) {
     return "basic";
   }
 
-  // Default safe profile
   return "basic";
 }
 
-// Build a concrete probe config from the selected profile
 function buildProbeConfigFromProfile(profile: ProbeProfile) {
   if (profile === "basic") {
     return {
@@ -258,7 +243,6 @@ function buildProbeConfigFromProfile(profile: ProbeProfile) {
     };
   }
 
-  // unstable
   return {
     readinessProbe: {
       httpGet: { path: "/", port: 80 },

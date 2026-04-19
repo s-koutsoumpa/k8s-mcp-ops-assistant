@@ -1,4 +1,5 @@
 import { appsV1, coreV1 } from "../k8s/client";
+import { suggestSmartResources } from "./resource-analyzer";
 
 type Severity = "low" | "medium" | "high";
 type AnalysisStatus = "healthy" | "warning" | "critical";
@@ -23,6 +24,11 @@ interface DeploymentAnalysisResult {
   probableCauses: string[];
   recommendations: Recommendation[];
   safeToAutoRemediate: boolean;
+  combinedReasoning?: {
+    dominantIssue: string;
+    fixOrder: string[];
+    explanation: string;
+  };
 }
 
 export async function analyzeDeployment(
@@ -33,14 +39,12 @@ export async function analyzeDeployment(
   const probableCauses: string[] = [];
   const recommendations: Recommendation[] = [];
 
-  // Read the deployment from Kubernetes
   const deploymentRes = await appsV1.readNamespacedDeployment(
     deploymentName,
     namespace
   );
 
   const deployment = deploymentRes.body;
-
   const spec = deployment.spec;
   const status = deployment.status;
 
@@ -48,13 +52,11 @@ export async function analyzeDeployment(
   const readyReplicas = status?.readyReplicas ?? 0;
   const availableReplicas = status?.availableReplicas ?? 0;
 
-  // Build label selector from deployment labels
   const matchLabels = spec?.selector?.matchLabels ?? {};
   const selector = Object.entries(matchLabels)
     .map(([key, value]) => `${key}=${value}`)
     .join(",");
 
-  // Read pods that belong to this deployment
   const podsRes = await coreV1.listNamespacedPod(
     namespace,
     undefined,
@@ -66,11 +68,9 @@ export async function analyzeDeployment(
 
   const pods = podsRes.body.items ?? [];
 
-  // Read namespace events
   const eventsRes = await coreV1.listNamespacedEvent(namespace);
   const allEvents = eventsRes.body.items ?? [];
 
-  // Check availability
   if (desiredReplicas > availableReplicas) {
     findings.push({
       type: "availability",
@@ -87,7 +87,6 @@ export async function analyzeDeployment(
     });
   }
 
-  // Basic probe presence check
   const containers = spec?.template?.spec?.containers ?? [];
 
   for (const container of containers) {
@@ -116,7 +115,6 @@ export async function analyzeDeployment(
     }
   }
 
-  // Check restarts and waiting states
   let totalRestarts = 0;
   const waitingReasons: string[] = [];
   let crashDetected = false;
@@ -155,7 +153,6 @@ export async function analyzeDeployment(
     });
   }
 
-  // Keep only events related to this deployment or its pods
   const relevantEvents = allEvents.filter((event) => {
     const involvedName = event.involvedObject?.name ?? "";
 
@@ -185,6 +182,10 @@ export async function analyzeDeployment(
 
   const hasSchedulingIssue = eventMessages.some(
     (msg) => msg.includes("FailedScheduling") || msg.includes("Insufficient")
+  );
+
+  const hasMissingProbes = containers.some(
+    (c) => !c.readinessProbe || !c.livenessProbe || !c.startupProbe
   );
 
   if (hasImagePullIssue) {
@@ -220,7 +221,6 @@ export async function analyzeDeployment(
     });
   }
 
-  // Convert findings to probable causes and recommendations
   if (
     hasImagePullIssue ||
     waitingReasons.includes("ImagePullBackOff") ||
@@ -257,7 +257,6 @@ export async function analyzeDeployment(
     });
   }
 
-  // If probe failures are already clear, prefer probe tuning before logs
   if (totalRestarts > 0 || crashDetected) {
     if (hasUnhealthyEvent) {
       probableCauses.push(
@@ -281,11 +280,7 @@ export async function analyzeDeployment(
     }
   }
 
-  if (
-    containers.some(
-      (c) => !c.readinessProbe || !c.livenessProbe || !c.startupProbe
-    )
-  ) {
+  if (hasMissingProbes) {
     probableCauses.push(
       "Missing probes reduce health visibility and may weaken failure detection."
     );
@@ -304,7 +299,69 @@ export async function analyzeDeployment(
     probableCauses.push("Pods exist but are not becoming healthy or available.");
   }
 
-  // Final status
+  // Combined reasoning for probe + resource interactions
+  const resourceMetricsForDeployment = pods.map((pod) => ({
+    pod: pod.metadata?.name ?? "",
+    cpu: "0",
+    memory: "0",
+  }));
+
+  // This lightweight signal only helps with ordering logic inside analyze_deployment.
+  // Full resource decisions still belong to analyze_resources.
+  const resourceProfilePreview = suggestSmartResources({
+    deploymentName,
+    podMetrics: resourceMetricsForDeployment,
+  });
+
+  let combinedReasoning:
+    | {
+        dominantIssue: string;
+        fixOrder: string[];
+        explanation: string;
+      }
+    | undefined;
+
+  const probeIssueStrong = hasUnhealthyEvent || hasMissingProbes;
+  const restartIssueStrong = totalRestarts >= 3;
+  const resourceIssueStrong = hasSchedulingIssue;
+
+  if (probeIssueStrong && resourceIssueStrong) {
+    combinedReasoning = {
+      dominantIssue: "combined_probe_and_resource_issue",
+      fixOrder: ["patch_resources", "patch_probes"],
+      explanation:
+        "The workload shows both resource-related and probe-related problems. Stabilizing resource availability first is usually safer, then probe tuning can be applied on a more stable runtime.",
+    };
+  } else if (probeIssueStrong && restartIssueStrong) {
+    combinedReasoning = {
+      dominantIssue: "probe_instability",
+      fixOrder: ["patch_probes"],
+      explanation:
+        "Repeated restarts and probe-related events suggest that health checks are a dominant source of instability. Probe tuning should be prioritized.",
+    };
+  } else if (resourceIssueStrong) {
+    combinedReasoning = {
+      dominantIssue: "resource_pressure",
+      fixOrder: ["patch_resources"],
+      explanation:
+        "Resource-related signals dominate the failure pattern, so resource tuning should be prioritized.",
+    };
+    } else if (resourceProfilePreview.selectedProfile === "cpu_pressure") {
+    combinedReasoning = {
+      dominantIssue: "cpu_pressure",
+      fixOrder: ["patch_resources"],
+      explanation:
+        "CPU pressure appears to be the main issue, so resource tuning should be applied before other optimizations.",
+    };
+  } else if (probeIssueStrong) {
+    combinedReasoning = {
+      dominantIssue: "probe_configuration",
+      fixOrder: ["patch_probes"],
+      explanation:
+        "Probe-related instability appears to be the dominant issue, so probe tuning should be prioritized.",
+    };
+  }
+
   let overallStatus: AnalysisStatus = "healthy";
 
   const hasHighSeverity = findings.some((f) => f.severity === "high");
@@ -321,10 +378,8 @@ export async function analyzeDeployment(
       ? "Deployment appears healthy."
       : findings[0].message;
 
-  // Remove duplicate probable causes
   const uniqueCauses = [...new Set(probableCauses)];
 
-  // Remove duplicate recommendations by action
   const uniqueRecommendations = recommendations.filter(
     (rec, index, arr) =>
       index === arr.findIndex((r) => r.action === rec.action)
@@ -339,5 +394,6 @@ export async function analyzeDeployment(
     probableCauses: uniqueCauses,
     recommendations: uniqueRecommendations,
     safeToAutoRemediate: false,
+    combinedReasoning,
   };
 }
