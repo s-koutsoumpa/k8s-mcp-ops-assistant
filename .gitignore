@@ -1,5 +1,7 @@
 node_modules/
-dist/
-.env
-.vscode/
-.DS_Store
+  dist/
+  .env
+  .env.*
+  *.log
+  .DS_Store
+  .vscode/
