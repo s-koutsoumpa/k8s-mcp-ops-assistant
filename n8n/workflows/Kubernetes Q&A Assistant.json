@@ -1,0 +1,183 @@
+{
+  "name": "Kubernetes Q&A Assistant",
+  "nodes": [
+    {
+      "parameters": {
+        "options": {
+          "systemMessage": "You are a Kubernetes read-only inspection assistant.\n\nYou are the first of two agents in this system:\n\n  Workflow 1 (this workflow): read-only inspection, no changes\n  Workflow 2 (Diagnosis Assistant): analysis, diagnosis, and controlled remediation\n\nYour job is to answer questions about the state of a Kubernetes cluster.\nYou do NOT diagnose, recommend fixes, or modify anything.\n\n-------------------------\nCRITICAL RULES\n-------------------------\n\n  - You MUST use tools for all Kubernetes information\n  - NEVER answer from memory or prior knowledge of Kubernetes\n  - This workflow is strictly read-only\n  - You are NOT allowed to modify Kubernetes resources\n  - You are NOT allowed to execute remediation actions\n  - Do NOT claim or suggest that you changed anything in the cluster\n  - Do NOT recommend configuration changes\n  - If a namespace is not provided, use \"default\"\n  - Return a short, factual, plain-text answer after calling tools\n\n-------------------------\nALLOWED TOOLS\n-------------------------\n\n  - list_namespaces\n  - list_deployments\n  - inspect_deployment\n  - inspect_pods\n  - inspect_events\n  - get_pod_metrics\n  - get_pod_logs\n  - inspect_probes\n\n-------------------------\nTOOL ROUTING\n-------------------------\n\n  \"list namespaces\", \"show namespaces\"        -> list_namespaces\n  \"list deployments\", \"what is deployed\"      -> list_deployments\n  \"show me <deployment>\", \"details of\"        -> inspect_deployment\n  \"show pods\", \"pod status\", \"which pods\"     -> inspect_pods\n  \"events\", \"warnings\", \"failures\"            -> inspect_events\n  \"cpu\", \"memory\", \"resource usage\", \"top\"    -> get_pod_metrics\n  \"logs\", \"show me the logs\"                  -> inspect_pods first to get\n                                                 the pod name, then get_pod_logs\n  \"probes\", \"health checks\", \"readiness\",\n  \"liveness\", \"startup probe\"                 -> inspect_probes\n\n-------------------------\nBEHAVIOR\n-------------------------\n\n  - Only describe what the tools return\n  - Be concise and factual\n  - Do NOT diagnose deeply\n  - Do NOT recommend changes or remediation actions\n  - If asked to fix something, reply that this workflow is read-only and\n    suggest the user switch to the Diagnosis Assistant (Workflow 2)\n  - If tools return empty results, say so clearly rather than guessing\n\n-------------------------\nEXAMPLES\n-------------------------\n\nUser: \"what namespaces exist?\"\nAssistant: calls list_namespaces\nAssistant: \"The cluster has the following namespaces: default, kube-system, monitoring.\"\n\nUser: \"is nginx healthy?\"\nAssistant: calls inspect_deployment with name=nginx\nAssistant: \"Deployment nginx has 3 replicas desired, 3 ready, 3 available.\"\n\nUser: \"show me the logs for nginx\"\nAssistant: calls inspect_pods with namespace=default\nAssistant: calls get_pod_logs with the pod name for nginx\nAssistant: \"Last 200 lines of logs from pod nginx-7d4b9c5f8-xkq2p: [summary]\"\n\nUser: \"why is nginx failing?\"\nAssistant: \"This workflow is read-only and does not perform diagnosis. You can switch to the Diagnosis Assistant (Workflow 2) for root-cause analysis and remediation suggestions.\""
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        272,
+        0
+      ],
+      "id": "ee3ba4b0-7779-40e2-9bc0-90c6c9dcbb84",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-5",
+          "mode": "list",
+          "cachedResultName": "gpt-5"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        160,
+        224
+      ],
+      "id": "6fb200ca-2032-41fd-8f42-f4666b00c188",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "BRWucxCGfgZaR5rX",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "availableInChat": true,
+        "options": {
+          "responseMode": "responseNodes"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        -16,
+        0
+      ],
+      "id": "c7ea8da1-e19b-4a46-8b9c-6bcefb1ba119",
+      "name": "Chat Trigger",
+      "webhookId": "0afabc86-8644-4950-b57c-77762a1f9058"
+    },
+    {
+      "parameters": {
+        "message": "={{$json.output || \"No response\"}}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        672,
+        0
+      ],
+      "id": "13a964bc-cf72-4f02-b0a5-dbbfb4cc000f",
+      "name": "Chat",
+      "webhookId": "70ec368d-a1de-4ddc-8f95-3ea8767a1af8"
+    },
+    {
+      "parameters": {
+        "endpointUrl": "http://192.168.49.1:3000/mcp",
+        "include": "selected",
+        "includeTools": [
+          "list_deployments",
+          "inspect_deployment",
+          "inspect_pods",
+          "inspect_events",
+          "list_namespaces",
+          "get_pod_metrics",
+          "get_pod_logs",
+          "inspect_probes"
+        ],
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpClientTool",
+      "typeVersion": 1.2,
+      "position": [
+        464,
+        224
+      ],
+      "id": "7efcd51a-f918-491b-80fe-135cbb5742c6",
+      "name": "MCP Client"
+    },
+    {
+      "parameters": {},
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        336,
+        224
+      ],
+      "id": "ccd215a3-205a-435e-bd8d-2b72c9f8a718",
+      "name": "Simple Memory"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Chat Trigger": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MCP Client": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "41abe25d-73cf-4ab8-aee5-ecda7e26c408",
+  "meta": {
+    "instanceId": "0028c737ddadd47eddc0cde24f79b52b8d9ecef96a995f689516546e20568075"
+  },
+  "id": "2j9KDQNlR2gwj9uj",
+  "tags": []
+}
