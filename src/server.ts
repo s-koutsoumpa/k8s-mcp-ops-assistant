@@ -41,7 +41,10 @@ export function createMcpServer() {
     { namespace: z.string().default("default") },
     async ({ namespace }: { namespace: string }) => ({
       content: [
-        { type: "text", text: JSON.stringify(await listDeployments(namespace), null, 2) },
+        {
+          type: "text",
+          text: JSON.stringify(await listDeployments(namespace), null, 2),
+        },
       ],
     })
   );
@@ -54,7 +57,10 @@ export function createMcpServer() {
     },
     async ({ name, namespace }: { name: string; namespace: string }) => ({
       content: [
-        { type: "text", text: JSON.stringify(await inspectDeployment(name, namespace), null, 2) },
+        {
+          type: "text",
+          text: JSON.stringify(await inspectDeployment(name, namespace), null, 2),
+        },
       ],
     })
   );
@@ -64,7 +70,10 @@ export function createMcpServer() {
     { namespace: z.string().default("default") },
     async ({ namespace }: { namespace: string }) => ({
       content: [
-        { type: "text", text: JSON.stringify(await inspectPods(namespace), null, 2) },
+        {
+          type: "text",
+          text: JSON.stringify(await inspectPods(namespace), null, 2),
+        },
       ],
     })
   );
@@ -74,13 +83,21 @@ export function createMcpServer() {
     { namespace: z.string().default("default") },
     async ({ namespace }: { namespace: string }) => ({
       content: [
-        { type: "text", text: JSON.stringify(await inspectEvents(namespace), null, 2) },
+        {
+          type: "text",
+          text: JSON.stringify(await inspectEvents(namespace), null, 2),
+        },
       ],
     })
   );
 
   server.tool("list_namespaces", {}, async () => ({
-    content: [{ type: "text", text: JSON.stringify(await listNamespaces(), null, 2) }],
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(await listNamespaces(), null, 2),
+      },
+    ],
   }));
 
   server.tool(
@@ -88,7 +105,10 @@ export function createMcpServer() {
     { namespace: z.string().default("default") },
     async ({ namespace }: { namespace: string }) => ({
       content: [
-        { type: "text", text: JSON.stringify(await getPodMetrics(namespace), null, 2) },
+        {
+          type: "text",
+          text: JSON.stringify(await getPodMetrics(namespace), null, 2),
+        },
       ],
     })
   );
@@ -100,9 +120,24 @@ export function createMcpServer() {
       namespace: z.string().default("default"),
       container: z.string().optional(),
     },
-    async ({ podName, namespace, container }: { podName: string; namespace: string; container?: string }) => ({
+    async ({
+      podName,
+      namespace,
+      container,
+    }: {
+      podName: string;
+      namespace: string;
+      container?: string;
+    }) => ({
       content: [
-        { type: "text", text: JSON.stringify(await getPodLogs(podName, namespace, container), null, 2) },
+        {
+          type: "text",
+          text: JSON.stringify(
+            await getPodLogs(podName, namespace, container),
+            null,
+            2
+          ),
+        },
       ],
     })
   );
@@ -115,7 +150,10 @@ export function createMcpServer() {
     },
     async ({ name, namespace }: { name: string; namespace: string }) => ({
       content: [
-        { type: "text", text: JSON.stringify(await inspectProbes(name, namespace), null, 2) },
+        {
+          type: "text",
+          text: JSON.stringify(await inspectProbes(name, namespace), null, 2),
+        },
       ],
     })
   );
@@ -124,20 +162,20 @@ export function createMcpServer() {
   // ANALYSIS TOOLS
   // -------------------------
 
-server.tool(
-  "analyze_deployment",
-  {
-    name: z.string(),
-    namespace: z.string().default("default"),
-  },
-  async ({ name, namespace }: { name: string; namespace: string }) => {
-    const result = await analyzeDeployment(namespace, name);
+  server.tool(
+    "analyze_deployment",
+    {
+      name: z.string(),
+      namespace: z.string().default("default"),
+    },
+    async ({ name, namespace }: { name: string; namespace: string }) => {
+      const result = await analyzeDeployment(namespace, name);
 
-    return {
-      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-    };
-  }
-);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    }
+  );
 
   server.tool(
     "analyze_probes",
@@ -204,9 +242,15 @@ server.tool(
         case "restart":
           result = await restartDeployment(params.name, params.namespace);
           break;
+
         case "scale":
-          result = await scaleDeployment(params.name, params.namespace, params.replicas);
+          result = await scaleDeployment(
+            params.name,
+            params.namespace,
+            params.replicas
+          );
           break;
+
         case "update_image":
           result = await updateDeploymentImage(
             params.name,
@@ -215,6 +259,7 @@ server.tool(
             params.newImage
           );
           break;
+
         case "patch_resources":
           result = await patchDeploymentResources(
             params.name,
@@ -223,6 +268,7 @@ server.tool(
             params.resources
           );
           break;
+
         case "patch_probes":
           result = await patchDeploymentProbes(
             params.name,
@@ -231,9 +277,11 @@ server.tool(
             params.probeConfig
           );
           break;
+
         case "rollback":
           result = await rollbackDeployment(params.name, params.namespace);
           break;
+
         default:
           throw new Error(`Unknown action: ${action}`);
       }

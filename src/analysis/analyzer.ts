@@ -39,7 +39,6 @@ export async function analyzeDeployment(
     namespace
   );
 
-  // In your client version, the real deployment object is inside .body
   const deployment = deploymentRes.body;
 
   const spec = deployment.spec;
@@ -49,7 +48,7 @@ export async function analyzeDeployment(
   const readyReplicas = status?.readyReplicas ?? 0;
   const availableReplicas = status?.availableReplicas ?? 0;
 
-  // Build label selector from deployment matchLabels
+  // Build label selector from deployment labels
   const matchLabels = spec?.selector?.matchLabels ?? {};
   const selector = Object.entries(matchLabels)
     .map(([key, value]) => `${key}=${value}`)
@@ -71,7 +70,7 @@ export async function analyzeDeployment(
   const eventsRes = await coreV1.listNamespacedEvent(namespace);
   const allEvents = eventsRes.body.items ?? [];
 
-  // Check if desired replicas are more than available replicas
+  // Check availability
   if (desiredReplicas > availableReplicas) {
     findings.push({
       type: "availability",
@@ -80,7 +79,6 @@ export async function analyzeDeployment(
     });
   }
 
-  // Check if desired replicas are more than ready replicas
   if (desiredReplicas > readyReplicas) {
     findings.push({
       type: "readiness",
@@ -89,39 +87,36 @@ export async function analyzeDeployment(
     });
   }
 
-  // Inspect probe configuration
+  // Basic probe presence check
   const containers = spec?.template?.spec?.containers ?? [];
-  const missingProbeMessages: string[] = [];
 
   for (const container of containers) {
     if (!container.readinessProbe) {
-      missingProbeMessages.push(
-        `Container "${container.name}" has no readinessProbe.`
-      );
+      findings.push({
+        type: "probe",
+        severity: "medium",
+        message: `Container "${container.name}" has no readinessProbe.`,
+      });
     }
 
     if (!container.livenessProbe) {
-      missingProbeMessages.push(
-        `Container "${container.name}" has no livenessProbe.`
-      );
+      findings.push({
+        type: "probe",
+        severity: "medium",
+        message: `Container "${container.name}" has no livenessProbe.`,
+      });
     }
 
     if (!container.startupProbe) {
-      missingProbeMessages.push(
-        `Container "${container.name}" has no startupProbe.`
-      );
+      findings.push({
+        type: "probe",
+        severity: "medium",
+        message: `Container "${container.name}" has no startupProbe.`,
+      });
     }
   }
 
-  for (const msg of missingProbeMessages) {
-    findings.push({
-      type: "probe",
-      severity: "medium",
-      message: msg,
-    });
-  }
-
-  // Inspect pod/container runtime state
+  // Check restarts and waiting states
   let totalRestarts = 0;
   const waitingReasons: string[] = [];
   let crashDetected = false;
@@ -156,7 +151,7 @@ export async function analyzeDeployment(
     findings.push({
       type: "stability",
       severity: "high",
-      message: "At least one container shows a terminated/crash state.",
+      message: "At least one container shows a terminated or crash state.",
     });
   }
 
@@ -171,7 +166,7 @@ export async function analyzeDeployment(
   });
 
   const eventMessages = relevantEvents.map(
-    (e) => `${e.reason ?? "Unknown"}: ${e.message ?? ""}`
+    (e) => `${e.reason ?? ""} ${e.message ?? ""}`
   );
 
   const hasImagePullIssue = eventMessages.some(
@@ -204,7 +199,16 @@ export async function analyzeDeployment(
     findings.push({
       type: "probe",
       severity: "high",
-      message: "Health check failures detected from events.",
+      message: "Health check failures detected from Kubernetes events.",
+    });
+
+    probableCauses.push(
+      "Kubernetes events indicate probe-related failures, such as readiness or liveness checks failing."
+    );
+
+    recommendations.push({
+      action: "patch_probes",
+      reason: "Adjust probe configuration based on observed health check failures.",
     });
   }
 
@@ -212,11 +216,11 @@ export async function analyzeDeployment(
     findings.push({
       type: "resources",
       severity: "high",
-      message: "Scheduling/resource-related issue detected from events.",
+      message: "Scheduling or resource issue detected from events.",
     });
   }
 
-  // Convert findings to possible causes + recommended actions
+  // Convert findings to probable causes and recommendations
   if (
     hasImagePullIssue ||
     waitingReasons.includes("ImagePullBackOff") ||
@@ -233,18 +237,18 @@ export async function analyzeDeployment(
 
     recommendations.push({
       action: "rollback",
-      reason: "Return to the last known working version.",
+      reason: "Return to the last known working version if available.",
     });
   }
 
   if (hasSchedulingIssue) {
     probableCauses.push(
-      "Cluster does not currently have enough resources to schedule the pods."
+      "Cluster may not currently have enough resources to schedule the pods."
     );
 
     recommendations.push({
       action: "patch_resources",
-      reason: "Adjust CPU/memory requests and limits.",
+      reason: "Adjust CPU or memory requests and limits.",
     });
 
     recommendations.push({
@@ -253,25 +257,42 @@ export async function analyzeDeployment(
     });
   }
 
+  // If probe failures are already clear, prefer probe tuning before logs
   if (totalRestarts > 0 || crashDetected) {
-    probableCauses.push(
-      "Application may be crashing during startup or runtime."
-    );
+    if (hasUnhealthyEvent) {
+      probableCauses.push(
+        "The deployment appears unstable due to probe-related failures or overly aggressive health checks."
+      );
 
-    recommendations.push({
-      action: "inspect_logs",
-      reason: "Check container logs before applying remediation.",
-    });
+      recommendations.push({
+        action: "patch_probes",
+        reason: "Tune readiness, liveness, or startup probes based on observed failures.",
+      });
+    } else {
+      probableCauses.push(
+        "Application may be crashing during startup or runtime."
+      );
+
+      recommendations.push({
+        action: "inspect_logs",
+        reason:
+          "Inspect container logs to confirm whether the application is crashing or failing internally.",
+      });
+    }
   }
 
-  if (missingProbeMessages.length > 0) {
+  if (
+    containers.some(
+      (c) => !c.readinessProbe || !c.livenessProbe || !c.startupProbe
+    )
+  ) {
     probableCauses.push(
-      "Missing probes reduce health visibility and may delay or weaken failure detection."
+      "Missing probes reduce health visibility and may weaken failure detection."
     );
 
     recommendations.push({
       action: "patch_probes",
-      reason: "Add or tune readiness/liveness/startup probes.",
+      reason: "Add or tune readiness, liveness, and startup probes.",
     });
   }
 
@@ -280,9 +301,10 @@ export async function analyzeDeployment(
     !hasImagePullIssue &&
     !hasSchedulingIssue
   ) {
-    probableCauses.push("Pods exist but are not becoming healthy/available.");
+    probableCauses.push("Pods exist but are not becoming healthy or available.");
   }
 
+  // Final status
   let overallStatus: AnalysisStatus = "healthy";
 
   const hasHighSeverity = findings.some((f) => f.severity === "high");
@@ -299,12 +321,14 @@ export async function analyzeDeployment(
       ? "Deployment appears healthy."
       : findings[0].message;
 
+  // Remove duplicate probable causes
+  const uniqueCauses = [...new Set(probableCauses)];
+
+  // Remove duplicate recommendations by action
   const uniqueRecommendations = recommendations.filter(
     (rec, index, arr) =>
       index === arr.findIndex((r) => r.action === rec.action)
   );
-
-  const uniqueCauses = [...new Set(probableCauses)];
 
   return {
     namespace,
