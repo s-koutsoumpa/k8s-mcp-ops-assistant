@@ -1,0 +1,53 @@
+# =============================================================================
+# T2 — CrashLoopBackOff scenario
+# =============================================================================
+#
+# WHAT THIS TESTS:
+#   Triggers a CrashLoopBackOff by running a container that prints a message
+#   and immediately exits with a non-zero status. The kubelet restarts the
+#   container, it exits again, and after a few cycles the restartCount
+#   climbs past 3 (Kubernetes' default probe failureThreshold).
+#
+# EXPECTED AGENT BEHAVIOUR:
+#   - analyze_deployment counts restarts across pods.
+#   - Once restarts >= 3, the "restarts" finding is escalated to severity
+#     "high" (RESTART_INSTABILITY_THRESHOLD in analyzer.ts).
+#   - probableCauses includes "Application may be crashing during startup
+#     or runtime."
+#   - recommendations include inspect_logs (to confirm the crash reason).
+#
+# HOW TO RUN:
+#   kubectl apply -f T2-crashloopbackoff.yaml
+#   kubectl get pods -l app=t2-crashloop -w     # watch RESTARTS climb
+#   # wait until restarts >= 3 (about 1-2 minutes)
+#   # then run a diagnosis through n8n
+#   kubectl delete -f T2-crashloopbackoff.yaml  # clean up
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: t2-crashloop
+  namespace: default
+  labels:
+    scenario: t2-crashloopbackoff
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: t2-crashloop
+  template:
+    metadata:
+      labels:
+        app: t2-crashloop
+    spec:
+      containers:
+        - name: app
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "starting up..."
+              sleep 2
+              echo "fatal error, exiting"
+              exit 1

@@ -1,0 +1,77 @@
+# =============================================================================
+# T7 — OOMKilled (out-of-memory)
+# =============================================================================
+#
+# WHAT THIS TESTS:
+#   A container that allocates 128Mi of memory, but is given a hard limit
+#   of only 64Mi. The Linux kernel kills the process with exit code 137
+#   (OOMKilled) and the kubelet restarts the container. The pod enters
+#   a restart loop visible in events, container status, and metrics.
+#
+#   This exercises TWO code paths that no other scenario covers:
+#     1. The OOMKilled detection branch in analyzer.ts STEP 6:
+#          if (terminatedReason === "OOMKilled") { crashDetected = true; }
+#     2. The "memory_pressure" classification path in resource-analyzer.ts.
+#
+# EXPECTED AGENT BEHAVIOUR (Diagnosis Assistant):
+#   - analyze_deployment detects:
+#       * lastState.terminated.reason = "OOMKilled" → crashDetected = true
+#       * a high-severity "stability" finding
+#       * restart count climbing
+#   - analyze_resources reports memory_pressure or underprovisioned
+#     (depending on observed CPU as well), with percentileSignals.memory
+#     showing usage above the 64Mi limit.
+#   - The agent recommends patch_resources with a higher memory limit.
+#
+# HOW TO RUN:
+#   kubectl apply -f T7-oomkilled.yaml
+#   # wait ~30 seconds for the first OOMKill to happen
+#   kubectl describe pod -l app=memory-hog | grep -A 5 "Last State"
+#   # should show "Reason: OOMKilled, Exit Code: 137"
+#   # then run a diagnosis through n8n
+#   kubectl delete -f T7-oomkilled.yaml                 # clean up
+#
+# PREREQUISITE:
+#   metrics-server must be installed (same as T6).
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: memory-hog
+  namespace: default
+  labels:
+    scenario: t7-oomkilled
+    app: memory-hog
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: memory-hog
+  template:
+    metadata:
+      labels:
+        app: memory-hog
+    spec:
+      containers:
+        - name: memory-hog
+          # stress lets us allocate specific amounts of memory.
+          image: polinux/stress
+          # Allocate 128 MiB of memory, which exceeds the 64Mi limit below.
+          command:
+            - stress
+            - --vm
+            - "1"
+            - --vm-bytes
+            - "128M"
+            - --vm-hang
+            - "60"
+            - --verbose
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "200m"
+              # Hard memory cap far below what the process tries to allocate.
+              # The kernel will kill the process with OOMKilled.
+              memory: "64Mi"

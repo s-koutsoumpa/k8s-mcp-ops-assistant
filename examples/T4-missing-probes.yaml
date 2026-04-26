@@ -1,0 +1,50 @@
+# =============================================================================
+# T4 — Missing probes (visibility gap)
+# =============================================================================
+#
+# WHAT THIS TESTS:
+#   A working deployment that is technically running fine, but has NO
+#   readiness, liveness, or startup probes. Without probes, Kubernetes
+#   cannot detect when the application becomes unresponsive — it will
+#   keep sending traffic to a broken container.
+#
+# EXPECTED AGENT BEHAVIOUR:
+#   - analyze_deployment status = "warning" (no high severity issues).
+#   - findings list contains three medium-severity probe entries:
+#       - Container "app" has no readinessProbe.
+#       - Container "app" has no livenessProbe.
+#       - Container "app" has no startupProbe.
+#   - probableCauses includes "Missing probes reduce health visibility..."
+#   - recommendations include patch_probes.
+#   - analyze_probes returns selectedProfile aligned with current state.
+#
+# HOW TO RUN:
+#   kubectl apply -f T4-missing-probes.yaml
+#   kubectl get pods -l app=t4-no-probes      # should be Running 1/1
+#   # then run analyze_deployment + analyze_probes through n8n
+#   kubectl delete -f T4-missing-probes.yaml  # clean up
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: t4-no-probes
+  namespace: default
+  labels:
+    scenario: t4-missing-probes
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: t4-no-probes
+  template:
+    metadata:
+      labels:
+        app: t4-no-probes
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.25
+          ports:
+            - containerPort: 80
+          # NOTE: deliberately no readinessProbe, livenessProbe, or
+          #       startupProbe to test the missing-probes detection.

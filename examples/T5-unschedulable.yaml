@@ -1,0 +1,55 @@
+# =============================================================================
+# T5 — FailedScheduling (unsatisfiable resource request)
+# =============================================================================
+#
+# WHAT THIS TESTS:
+#   Requests resources no node in the cluster can satisfy (1000 cores,
+#   1000 GiB memory). The scheduler emits a "FailedScheduling" event
+#   with reason "Insufficient cpu" / "Insufficient memory", and the
+#   pod stays in "Pending" state indefinitely.
+#
+# EXPECTED AGENT BEHAVIOUR:
+#   - analyze_deployment detects "FailedScheduling" / "Insufficient" in
+#     events (hasSchedulingIssue = true).
+#   - findings list contains a high-severity "resources" entry.
+#   - probableCauses includes "Cluster may not currently have enough
+#     resources to schedule the pods."
+#   - recommendations include patch_resources and scale.
+#   - combinedReasoning.dominantIssue = "resource_pressure" or
+#     "combined_probe_and_resource_issue" (because no probes are set).
+#
+# HOW TO RUN:
+#   kubectl apply -f T5-unschedulable.yaml
+#   kubectl get pods -l app=t5-unschedulable           # stays Pending
+#   kubectl get events --field-selector reason=FailedScheduling
+#   # then run a diagnosis through n8n
+#   kubectl delete -f T5-unschedulable.yaml            # clean up
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: t5-unschedulable
+  namespace: default
+  labels:
+    scenario: t5-failedscheduling
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: t5-unschedulable
+  template:
+    metadata:
+      labels:
+        app: t5-unschedulable
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.25
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              # Deliberately impossible: 1000 CPU cores and 1000 GiB memory.
+              # No single node in a normal cluster has this capacity.
+              cpu: "1000"
+              memory: "1000Gi"

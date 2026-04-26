@@ -1,0 +1,82 @@
+# =============================================================================
+# T6 — CPU pressure under load (the VPA-aligned showcase)
+# =============================================================================
+#
+# WHAT THIS TESTS:
+#   A container that burns 2 CPU workers continuously, but is given an
+#   artificially low CPU limit (100m = 0.1 cores). Kubernetes throttles
+#   the container, and observed CPU usage stays well above the request.
+#
+#   This is the most important demo for the VPA-aligned refactor in
+#   src/analysis/resource-analyzer.ts. The output should include a
+#   populated `percentileSignals` block with non-zero p50/p90/p95
+#   values — visible proof that the new code path is doing real work.
+#
+# EXPECTED AGENT BEHAVIOUR (Diagnosis Assistant):
+#   - analyze_resources returns selectedProfile = "cpu_pressure" or
+#     "underprovisioned".
+#   - smartTuning.percentileSignals.cpu shows:
+#       p50Millicores  > 0
+#       p90Millicores  > 0  (used as the basis for the recommended request)
+#       p95Millicores  > 0  (used as the basis for the recommended limit)
+#       targetMillicoresWithMargin       (p90 * 1.15, floored to 25m)
+#       upperBoundMillicoresWithMargin   (p95 * 1.15, floored to 25m)
+#   - smartTuning.suggestedResources contains concrete CPU/memory values
+#     well above the original 50m/32Mi requests.
+#   - rationale mentions the VPA-aligned methodology and cites the URL.
+#
+# HOW TO RUN:
+#   kubectl apply -f T6-cpu-pressure.yaml
+#   kubectl get pods -l app=t6-cpu-load                 # should be Running
+#   # WAIT 2-3 minutes for metrics-server to collect samples.
+#   kubectl top pods -l app=t6-cpu-load                 # confirm CPU is high
+#   # then run analyze_resources through n8n
+#   kubectl delete -f T6-cpu-pressure.yaml              # clean up
+#
+# PREREQUISITE:
+#   metrics-server must be installed on the cluster:
+#     kubectl get apiservices | grep metrics.k8s.io
+#   On minikube: minikube addons enable metrics-server
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: t6-cpu-load
+  namespace: default
+  labels:
+    scenario: t6-cpu-pressure
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: t6-cpu-load
+  template:
+    metadata:
+      labels:
+        app: t6-cpu-load
+    spec:
+      containers:
+        - name: app
+          # polinux/stress is a small, well-documented stress image.
+          image: polinux/stress
+          # Burn 2 CPU workers continuously for an hour.
+          command:
+            - stress
+            - --cpu
+            - "2"
+            - --verbose
+            - --timeout
+            - "3600s"
+          resources:
+            # Deliberately UNDER-PROVISIONED so that observed usage
+            # (driven by the stress args above) clearly exceeds these
+            # requests, producing a visible "cpu_pressure" or
+            # "underprovisioned" verdict from analyze_resources.
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              # Hard cap far below what 2 stress workers want.
+              # This causes sustained CPU throttling.
+              cpu: "100m"
+              memory: "64Mi"

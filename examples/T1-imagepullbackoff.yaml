@@ -1,0 +1,45 @@
+# =============================================================================
+# T1 — ImagePullBackOff scenario
+# =============================================================================
+#
+# WHAT THIS TESTS:
+#   Triggers an "ImagePullBackOff" / "ErrImagePull" failure by referencing a
+#   tag that does not exist on Docker Hub. The kubelet retries with backoff,
+#   so the pod stays in "ImagePullBackOff" state.
+#
+# EXPECTED AGENT BEHAVIOUR:
+#   - analyze_deployment reports a high-severity "image" finding.
+#   - probableCauses includes "Deployment image is invalid, unavailable,
+#     or cannot be pulled."
+#   - recommendations include update_image and rollback.
+#   - With the diagnosis assistant, the agent should ask for approval
+#     and then call update_image with a working tag (e.g. nginx:1.25).
+#
+# HOW TO RUN:
+#   kubectl apply -f T1-imagepullbackoff.yaml
+#   kubectl get pods -l app=t1-bad-image -w     # wait until ImagePullBackOff
+#   # then run a diagnosis through n8n
+#   kubectl delete -f T1-imagepullbackoff.yaml  # clean up after capture
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: t1-bad-image
+  namespace: default
+  labels:
+    scenario: t1-imagepullbackoff
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: t1-bad-image
+  template:
+    metadata:
+      labels:
+        app: t1-bad-image
+    spec:
+      containers:
+        - name: app
+          image: nginx:this-tag-does-not-exist
+          ports:
+            - containerPort: 80

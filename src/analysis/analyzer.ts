@@ -278,6 +278,7 @@ export async function analyzeDeployment(
   let totalRestarts = 0;
   const waitingReasons: string[] = []; // reasons why containers are stuck waiting
   let crashDetected = false;
+  let oomDetected = false; // OOMKilled is a specific memory-pressure signal
 
   for (const pod of pods) {
     const containerStatuses = pod.status?.containerStatuses ?? [];
@@ -294,12 +295,18 @@ export async function analyzeDeployment(
         waitingReasons.push(waitingReason);
       }
 
-      // Check if the container last exited due to an error or memory kill (OOMKilled).
+      // Check if the container last exited due to an error or memory kill.
       // K8sGPT's pod analyzer also reports lastTerminationState.terminated.reason
       // when state.waiting.reason is "CrashLoopBackOff".
+      // We distinguish OOMKilled from generic Error because OOMKilled is a
+      // memory-pressure signal that should drive resource tuning, not probe
+      // tuning, even when probes are missing on the workload.
       const terminatedReason = cs.lastState?.terminated?.reason;
       if (terminatedReason === "Error" || terminatedReason === "OOMKilled") {
         crashDetected = true;
+      }
+      if (terminatedReason === "OOMKilled") {
+        oomDetected = true;
       }
     }
   }
@@ -318,6 +325,14 @@ export async function analyzeDeployment(
       type: "stability",
       severity: "high",
       message: "At least one container shows a terminated or crash state.",
+    });
+  }
+
+  if (oomDetected) {
+    findings.push({
+      type: "memory",
+      severity: "high",
+      message: "At least one container was terminated by the OOMKiller (memory limit exceeded).",
     });
   }
 
@@ -512,16 +527,53 @@ export async function analyzeDeployment(
   // ---------------------------------------------------------------------------
   // STEP 11: Decide the "combined reasoning" — which problem to fix first
   // ---------------------------------------------------------------------------
+  //
+  // PRIORITISATION RATIONALE:
+  // Multiple issues can coexist on a deployment (e.g. missing probes AND
+  // an OOMKilled container). When that happens, we have to decide which
+  // issue is "dominant" so the agent recommends the right first fix.
+  //
+  // The decision logic below uses the principle that DIRECT EVIDENCE of an
+  // application-level failure (OOMKilled, generic crash, or probe-failure
+  // events) outranks STRUCTURAL warnings (missing probes). Specifically:
+  //
+  //   * OOMKilled is a memory-pressure signal — fix resources, not probes,
+  //     even if probes happen to be missing.
+  //   * A crashed-but-no-probe-events container is most likely an
+  //     application-level crash — recommend log inspection, not probe
+  //     tuning, even if probes happen to be missing.
+  //   * "Missing probes" alone (no events, no restarts, no crashes) is
+  //     a configuration warning, and probe tuning is appropriate then.
+  //
+  // This avoids the failure mode where missing probes "swallow" the
+  // diagnosis of OOMKilled or crashing workloads. (Discovered during
+  // evaluation against scenarios T2, T7, and T8 — see TESTING.md.)
 
   let combinedReasoning:
     | { dominantIssue: string; fixOrder: string[]; explanation: string }
     | undefined;
 
-  const probeIssueStrong = hasUnhealthyEvent || hasMissingProbes;
+  // "probeIssueStrong" now requires actual probe-failure events — not just
+  // missing probes — before probe tuning can dominate combined reasoning.
+  // Missing probes still produce findings + a recommendation in earlier
+  // steps; they just don't outrank crash/OOM/scheduling signals here.
+  const probeIssueStrong = hasUnhealthyEvent;
   const restartIssueStrong = totalRestarts >= RESTART_INSTABILITY_THRESHOLD;
   const resourceIssueStrong = hasSchedulingIssue;
+  const oomIssueStrong = oomDetected;
+  const appCrashIssueStrong =
+    crashDetected && !hasUnhealthyEvent && !oomDetected;
 
-  if (probeIssueStrong && resourceIssueStrong) {
+  if (oomIssueStrong) {
+    // OOMKilled is unambiguous: the container exceeded its memory limit.
+    // Recommend resource tuning regardless of probe state.
+    combinedReasoning = {
+      dominantIssue: "memory_pressure",
+      fixOrder: ["patch_resources"],
+      explanation:
+        "At least one container was OOMKilled, meaning it exceeded its memory limit. Memory tuning should be applied first; probe configuration is secondary.",
+    };
+  } else if (probeIssueStrong && resourceIssueStrong) {
     // Both probe and resource problems: fix resources first, then probes.
     combinedReasoning = {
       dominantIssue: "combined_probe_and_resource_issue",
@@ -536,6 +588,15 @@ export async function analyzeDeployment(
       fixOrder: ["patch_probes"],
       explanation:
         "Repeated restarts and probe-related events suggest that health checks are a dominant source of instability. Probe tuning should be prioritized.",
+    };
+  } else if (appCrashIssueStrong) {
+    // Container is crashing, but no probe-failure events explain it.
+    // Recommend reading logs to find the application-level cause.
+    combinedReasoning = {
+      dominantIssue: "application_crash",
+      fixOrder: ["inspect_logs"],
+      explanation:
+        "The container is crashing without probe-failure events, which suggests an application-level error. The agent should inspect the container logs to identify the cause before any cluster-side remediation is applied.",
     };
   } else if (resourceIssueStrong) {
     // Only resource problems detected.
@@ -554,12 +615,22 @@ export async function analyzeDeployment(
         "CPU pressure appears to be the main issue, so resource tuning should be applied before other optimizations.",
     };
   } else if (probeIssueStrong) {
-    // Only probe problems detected.
+    // Only probe problems detected (probe-failure events present).
     combinedReasoning = {
-      dominantIssue: "probe_configuration",
+      dominantIssue: "probe_instability",
       fixOrder: ["patch_probes"],
       explanation:
         "Probe-related instability appears to be the dominant issue, so probe tuning should be prioritized.",
+    };
+  } else if (hasMissingProbes) {
+    // No events, no restarts, no crashes — just configuration.
+    // Add probes for visibility, but this is a structural improvement
+    // rather than a remediation of an active failure.
+    combinedReasoning = {
+      dominantIssue: "missing_probes",
+      fixOrder: ["patch_probes"],
+      explanation:
+        "The workload appears stable but has no health probes configured. Adding probes will improve visibility and let Kubernetes detect future failures automatically.",
     };
   }
 

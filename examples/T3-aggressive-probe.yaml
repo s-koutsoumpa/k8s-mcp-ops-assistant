@@ -1,0 +1,92 @@
+# =============================================================================
+# T3 — Aggressive liveness probe (probe-induced restarts)
+# =============================================================================
+#
+# WHAT THIS TESTS:
+#   The container starts nginx after a deliberate 20-second `sleep`. During
+#   those 20 seconds nginx is not yet listening, so the readiness and
+#   liveness probes (configured to start checking at 2s and 5s respectively)
+#   fail. The kubelet emits "Readiness probe failed" / "Liveness probe failed"
+#   events and eventually restarts the container. On the next cycle the
+#   container sleeps 20s again, the probes fail again, and the cycle repeats.
+#
+#   This is a textbook example of probe misconfiguration: the probes start
+#   too aggressively for the application's actual startup time. A startupProbe
+#   would solve it cleanly, but this manifest deliberately omits one so the
+#   agent can suggest adding it.
+#
+# EXPECTED AGENT BEHAVIOUR (Diagnosis Assistant):
+#   - analyze_deployment finds:
+#       * "Readiness probe failed" / "Liveness probe failed" events
+#         (hasUnhealthyEvent = true)
+#       * restart count climbs >= 3 (RESTART_INSTABILITY_THRESHOLD)
+#       * missing startupProbe (one of the medium-severity probe findings)
+#   - combinedReasoning.dominantIssue = "probe_instability"
+#   - combinedReasoning.fixOrder = ["patch_probes"]
+#   - The agent recommends patch_probes (NOT inspect_logs), because
+#     events already explain the failure. This is the contrast with T2.
+#   - analyze_probes selects a profile that adds a startupProbe and relaxes
+#     the liveness check.
+#
+# HOW TO RUN:
+#   kubectl apply -f T3-aggressive-probe.yaml
+#   kubectl get pods -l app=t3-aggressive-probe -w     # restarts climb
+#   kubectl describe pod -l app=t3-aggressive-probe    # see probe events
+#   # then run a diagnosis through n8n
+#   kubectl delete -f T3-aggressive-probe.yaml         # clean up
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: t3-aggressive-probe
+  namespace: default
+  labels:
+    scenario: t3-aggressive-probe
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: t3-aggressive-probe
+  template:
+    metadata:
+      labels:
+        app: t3-aggressive-probe
+    spec:
+      containers:
+        - name: app
+          image: nginx:1.25
+          ports:
+            - containerPort: 80
+
+          # Deliberately slow the container's startup so probes have
+          # something to fail on. Nginx will not serve requests until
+          # the 20-second sleep finishes.
+          command:
+            - sh
+            - -c
+            - "sleep 20 && nginx -g 'daemon off;'"
+
+          # Readiness probe: starts checking at 2s, fails fast.
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 2
+            timeoutSeconds: 1
+            periodSeconds: 2
+            failureThreshold: 1
+
+          # Liveness probe: starts checking at 5s, fails fast,
+          # causing the kubelet to restart the container.
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            timeoutSeconds: 1
+            periodSeconds: 2
+            failureThreshold: 2
+
+          # No startupProbe — that's part of what the agent should suggest
+          # adding. A startupProbe would isolate the slow-startup phase
+          # from the steady-state liveness check.

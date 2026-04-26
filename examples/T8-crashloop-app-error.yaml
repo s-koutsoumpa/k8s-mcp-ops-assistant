@@ -1,0 +1,74 @@
+# =============================================================================
+# T8 — CrashLoopBackOff with application log inspection
+# =============================================================================
+#
+# WHAT THIS TESTS:
+#   The container starts, prints two log lines, then exits with a non-zero
+#   code. The kubelet restarts it, but the same thing happens on every
+#   restart. The pod enters CrashLoopBackOff.
+#
+#   Crucially — and this is what makes T8 different from T2 — Kubernetes
+#   events do NOT clearly explain the root cause. There is no
+#   ImagePullBackOff, no OOMKilled, no probe failure event. The only way
+#   to discover the real cause is by reading the container logs, where
+#   the application has helpfully logged "ECONNREFUSED to postgres".
+#
+#   This exercises the agent's "events don't explain it → call get_pod_logs"
+#   branch, which is documented in n8n/system-prompts/diagnosis-assistant.txt
+#   under EXAMPLE FLOW 3.
+#
+# EXPECTED AGENT BEHAVIOUR (Diagnosis Assistant):
+#   1. analyze_deployment shows high restart counts but no probe or image
+#      issues. probableCauses includes "Application may be crashing during
+#      startup or runtime."
+#   2. recommendations include inspect_logs (NOT patch_probes, because
+#      no probe events exist).
+#   3. The agent calls inspect_pods to get the pod name.
+#   4. The agent calls get_pod_logs with that pod name.
+#   5. The agent summarises the log output ("ECONNREFUSED 127.0.0.1:5432")
+#      and tells the user this is an application-level issue, not a
+#      Kubernetes issue.
+#   6. The agent does NOT propose any cluster-side remediation; instead
+#      it suggests the user fix the database connection.
+#
+# HOW TO RUN:
+#   kubectl apply -f T8-crashloop-app-error.yaml
+#   kubectl get pods -l app=db-client-app             # wait for restarts >= 3
+#   kubectl logs -l app=db-client-app                 # see the ECONNREFUSED line
+#   # then run a diagnosis through n8n
+#   kubectl delete -f T8-crashloop-app-error.yaml     # clean up
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: db-client-app
+  namespace: default
+  labels:
+    scenario: t8-crashloop-app-error
+    app: db-client-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: db-client-app
+  template:
+    metadata:
+      labels:
+        app: db-client-app
+    spec:
+      containers:
+        - name: db-client-app
+          # A minimal image with a shell.
+          image: busybox:1.36
+          # Simulate an application that crashes because it cannot reach
+          # its database. The log line is deliberately specific so the
+          # agent has a clear signal to report back.
+          command:
+            - sh
+            - -c
+            - |
+              echo "[INFO] Starting application..."
+              sleep 2
+              echo "[ERROR] Failed to connect to database: ECONNREFUSED 127.0.0.1:5432"
+              echo "[FATAL] Cannot continue without database connection. Exiting."
+              exit 1
