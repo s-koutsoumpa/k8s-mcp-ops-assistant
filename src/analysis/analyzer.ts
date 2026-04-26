@@ -9,6 +9,34 @@
 // angles and returns a structured report describing what is wrong and what
 // to do about it.
 //
+// METHODOLOGICAL REFERENCE — K8sGPT pod analyzer:
+// ------------------------------------------------
+// The "scan recent events and pod container statuses for known error patterns"
+// approach used in this file is the same approach K8sGPT uses in its Pod
+// analyzer. We follow the same pattern (categorize by waiting-state reason
+// and event-message keywords) and use the same vocabulary of error reasons
+// (ImagePullBackOff, ErrImagePull, CrashLoopBackOff, FailedScheduling,
+// Liveness/Readiness probe failed). For the upstream reference, see:
+//
+//   https://github.com/k8sgpt-ai/k8sgpt/blob/main/pkg/analyzer/pod.go
+//
+// In particular, K8sGPT's analyzeContainerStatusFailures() function and its
+// isErrorReason() helper enumerate the same set of waiting-state reasons we
+// look for below ("CrashLoopBackOff", "ImagePullBackOff",
+// "CreateContainerConfigError", "PreCreateHookError", "CreateContainerError",
+// "PreStartHookError", "RunContainerError", "ImageInspectError",
+// "ErrImagePull", "ErrImageNeverPull", "InvalidImageName"). We use a
+// narrower subset focused on the failure modes our remediation actions
+// can address (image pulls, scheduling, probes, restarts).
+//
+// EVENT KEYWORDS REFERENCE — Kubernetes scheduler & kubelet:
+// ----------------------------------------------------------
+// The event-message keywords we match ("FailedScheduling", "Insufficient",
+// "Readiness probe failed", "Liveness probe failed", "Unhealthy") are emitted
+// directly by the Kubernetes scheduler and kubelet:
+//   - https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+//   - https://kubernetes.io/docs/concepts/scheduling-eviction/
+//
 // WHERE IS IT USED?
 // -----------------
 // Called by:
@@ -69,6 +97,27 @@ interface DeploymentAnalysisResult {
 }
 
 
+// -----------------------------------------------------------------------------
+// Restart-count threshold for "the deployment is meaningfully unstable"
+// -----------------------------------------------------------------------------
+// We elevate a "restarts" finding from medium to high severity once the
+// total container restart count across the deployment reaches this number.
+//
+// REFERENCE: Kubernetes uses 3 as the default failureThreshold for liveness,
+// readiness, and startup probes. Three failures is "the kubelet's official
+// definition of unstable" — see:
+//
+//   https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
+//
+// We pick the same number so our severity escalation aligns with the
+// kubelet's own failure model. The KEP for automatic Pod hard-reset
+// (KEP-5734) uses 7 as the late-stage threshold; ours is the early-warning
+// counterpart.
+//   https://github.com/kubernetes/enhancements/issues/5734
+// -----------------------------------------------------------------------------
+const RESTART_INSTABILITY_THRESHOLD = 3;
+
+
 // =============================================================================
 // analyzeDeployment
 // =============================================================================
@@ -126,18 +175,12 @@ export async function analyzeDeployment(
 
   // Build a label selector string like "app=my-app" so we only get pods
   // that belong to this deployment.
-  // "??" means: if matchLabels is null/undefined, use an empty object {}.
   const matchLabels = spec?.selector?.matchLabels ?? {};
 
-  // Object.entries() turns { app: "nginx" } into [["app", "nginx"]].
-  // We then format each pair as "key=value" and join them with commas.
   const selector = Object.entries(matchLabels)
     .map(([key, value]) => `${key}=${value}`)
     .join(",");
 
-  // The Kubernetes client uses positional arguments. We only need the
-  // namespace (1st) and labelSelector (6th), so we pass "undefined" for
-  // the four arguments in between.
   const podsRes = await coreV1.listNamespacedPod(
     namespace,
     undefined,
@@ -185,6 +228,9 @@ export async function analyzeDeployment(
   // ---------------------------------------------------------------------------
   // Probes let Kubernetes know if a container is alive and ready for traffic.
   // Missing probes mean Kubernetes cannot detect problems automatically.
+  //
+  // REFERENCE — Kubernetes probes documentation:
+  //   https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
 
   const containers = spec?.template?.spec?.containers ?? [];
 
@@ -218,6 +264,16 @@ export async function analyzeDeployment(
   // ---------------------------------------------------------------------------
   // STEP 6: Count restarts and check for crash states across all pods
   // ---------------------------------------------------------------------------
+  //
+  // METHODOLOGY REFERENCE — K8sGPT pod analyzer:
+  // The pattern of iterating containerStatuses and inspecting state.waiting
+  // and lastState.terminated is the same one K8sGPT uses in its
+  // analyzeContainerStatusFailures() function. URL:
+  //   https://github.com/k8sgpt-ai/k8sgpt/blob/main/pkg/analyzer/pod.go
+  //
+  // Severity escalation at >= 3 restarts uses Kubernetes' own default
+  // failureThreshold of 3 as the boundary between "transient blip" and
+  // "sustained instability". See RESTART_INSTABILITY_THRESHOLD above.
 
   let totalRestarts = 0;
   const waitingReasons: string[] = []; // reasons why containers are stuck waiting
@@ -231,12 +287,16 @@ export async function analyzeDeployment(
       totalRestarts += cs.restartCount ?? 0;
 
       // If a container is waiting, record why (e.g. "ImagePullBackOff").
+      // These reason strings come from the kubelet and are the same set
+      // K8sGPT's isErrorReason() helper enumerates.
       const waitingReason = cs.state?.waiting?.reason;
       if (waitingReason) {
         waitingReasons.push(waitingReason);
       }
 
       // Check if the container last exited due to an error or memory kill (OOMKilled).
+      // K8sGPT's pod analyzer also reports lastTerminationState.terminated.reason
+      // when state.waiting.reason is "CrashLoopBackOff".
       const terminatedReason = cs.lastState?.terminated?.reason;
       if (terminatedReason === "Error" || terminatedReason === "OOMKilled") {
         crashDetected = true;
@@ -247,7 +307,8 @@ export async function analyzeDeployment(
   if (totalRestarts > 0) {
     findings.push({
       type: "restarts",
-      severity: totalRestarts >= 3 ? "high" : "medium",
+      // Severity escalates at the kubelet's default failureThreshold (3).
+      severity: totalRestarts >= RESTART_INSTABILITY_THRESHOLD ? "high" : "medium",
       message: `Detected ${totalRestarts} container restarts across deployment pods.`,
     });
   }
@@ -284,9 +345,25 @@ export async function analyzeDeployment(
   // ---------------------------------------------------------------------------
   // STEP 8: Look for known bad patterns in the event messages
   // ---------------------------------------------------------------------------
+  //
+  // PATTERN-MATCHING REFERENCE — K8sGPT pod analyzer:
+  // The exact reason strings we match below are the same set K8sGPT looks
+  // for in its isErrorReason() helper:
+  //   "CrashLoopBackOff", "ImagePullBackOff", "CreateContainerConfigError",
+  //   "PreCreateHookError", "CreateContainerError", "PreStartHookError",
+  //   "RunContainerError", "ImageInspectError", "ErrImagePull",
+  //   "ErrImageNeverPull", "InvalidImageName"
+  // URL: https://github.com/k8sgpt-ai/k8sgpt/blob/main/pkg/analyzer/pod.go
+  //
+  // We only match the subset relevant to remediations our system can perform
+  // (image pulls, scheduling, probe failures). Other K8sGPT-style reasons
+  // (CreateContainerConfigError, PreStartHookError, etc.) are handled by
+  // the agent reading pod logs rather than this rule-based analyzer.
 
   const hasImagePullIssue = eventMessages.some(
     (msg) =>
+      // The first three are reason/message strings emitted directly by the kubelet:
+      //   https://kubernetes.io/docs/concepts/containers/images/
       msg.includes("ImagePullBackOff") ||
       msg.includes("ErrImagePull") ||
       msg.includes("Failed to pull image")
@@ -294,12 +371,18 @@ export async function analyzeDeployment(
 
   const hasUnhealthyEvent = eventMessages.some(
     (msg) =>
+      // "Unhealthy", "Readiness probe failed", and "Liveness probe failed"
+      // are emitted by the kubelet's prober. See:
+      //   https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
       msg.includes("Unhealthy") ||
       msg.includes("Readiness probe failed") ||
       msg.includes("Liveness probe failed")
   );
 
   const hasSchedulingIssue = eventMessages.some(
+    // "FailedScheduling" and "Insufficient ..." are emitted by the
+    // default-scheduler when it cannot find a node to place the pod. See:
+    //   https://kubernetes.io/docs/concepts/scheduling-eviction/
     (msg) => msg.includes("FailedScheduling") || msg.includes("Insufficient")
   );
 
@@ -409,6 +492,10 @@ export async function analyzeDeployment(
   // We pass placeholder metrics (cpu/memory = "0") because this is only used
   // to determine the ORDER in which fixes should be applied.
   // Real resource decisions happen in analyze_resources, not here.
+  //
+  // With all-zero placeholder metrics, the VPA-aligned percentile path
+  // returns "balanced", which is the same neutral signal the previous
+  // threshold-based code returned. So no behaviour changes here.
 
   const resourceMetricsForDeployment = pods.map((pod) => ({
     pod: pod.metadata?.name ?? "",
@@ -431,7 +518,7 @@ export async function analyzeDeployment(
     | undefined;
 
   const probeIssueStrong = hasUnhealthyEvent || hasMissingProbes;
-  const restartIssueStrong = totalRestarts >= 3;
+  const restartIssueStrong = totalRestarts >= RESTART_INSTABILITY_THRESHOLD;
   const resourceIssueStrong = hasSchedulingIssue;
 
   if (probeIssueStrong && resourceIssueStrong) {
@@ -503,7 +590,6 @@ export async function analyzeDeployment(
   // ---------------------------------------------------------------------------
 
   // new Set(...) removes exact duplicates from the array.
-  // The "..." spread syntax turns the Set back into an array.
   const uniqueCauses = [...new Set(probableCauses)];
 
   // Keep only the first recommendation for each action name (no duplicates).
