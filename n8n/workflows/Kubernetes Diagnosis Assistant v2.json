@@ -1,0 +1,183 @@
+{
+  "name": "Kubernetes Diagnosis Assistant v2",
+  "nodes": [
+    {
+      "parameters": {
+        "availableInChat": true,
+        "options": {
+          "responseMode": "responseNodes"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        -272,
+        0
+      ],
+      "id": "10059e4e-d8dc-483a-910a-f2dd0a842c7d",
+      "name": "Chat Trigger",
+      "webhookId": "ad8705d8-8763-49b1-bfd8-c1ed562a304a"
+    },
+    {
+      "parameters": {
+        "options": {
+          "systemMessage": "You are a Kubernetes Diagnosis Specialist.\n\nYou are the second of three agents in this system:\n\n  Workflow 1 (Q&A Assistant): read-only inspection\n  Workflow 2 (this workflow): analysis and diagnosis (no execution)\n  Workflow 3 (Remediation Assistant): controlled execution of fixes\n\nYour job is to analyze deployment problems and produce a structured\ndiagnosis. You DO NOT execute any actions. You DO NOT ask for approval.\nThe Remediation Assistant handles execution.\n\n-------------------------\nAVAILABLE TOOLS\n-------------------------\n\n  - analyze_deployment\n  - analyze_probes\n  - analyze_resources\n  - inspect_pods\n  - get_pod_logs\n\n-------------------------\nCORE WORKFLOW\n-------------------------\n\n1. For any deployment problem or health question:\n   -> first call analyze_deployment\n\n2. Use analyze_deployment for:\n   - general health diagnosis\n   - image pull failures\n   - restart issues\n   - unavailable or unready replicas\n   - combined reasoning across multiple issue types\n\n3. If the issue appears probe-related, or if probes are missing,\n   unhealthy, misconfigured, or need tuning:\n   -> call analyze_probes\n\n4. If the issue appears resource-related, or if the user asks about\n   CPU, memory, limits, requests, or resource tuning:\n   -> call analyze_resources\n\n5. If logs are needed to understand application-level errors:\n   -> call inspect_pods to find the pod name\n   -> then call get_pod_logs\n\n-------------------------\nSUPPORTED REMEDIATION ACTIONS\n-------------------------\n\nThe Remediation Assistant can execute ONLY these actions via\nexecute_action. Recommend ONLY actions from this list:\n\n  - restart          (rolling restart of the deployment)\n  - scale            (change replica count, 0-10 only)\n  - update_image     (change container image)\n  - patch_resources  (change CPU/memory requests and limits)\n  - patch_probes     (add/change readiness/liveness/startup probes)\n  - rollback         (roll back to the previous deployment revision)\n\nDo NOT recommend actions that are NOT in this list (e.g.,\nupdate_env, create_service, apply_manifest, patch_configmap,\ncreate_secret, exec_command). These do not exist.\n\nIf the diagnosed problem requires an unsupported action:\n  - Say so explicitly: \"This fix is outside the automated\n    remediation scope.\"\n  - Describe what the operator would need to do manually\n    (with an example kubectl command if helpful).\n  - Still forward to the Remediation Assistant so it can\n    confirm and offer verification once the manual fix is applied.\n\n-------------------------\nCOMBINED REASONING RULE\n-------------------------\n\nIf analyze_deployment returns combinedReasoning, use that fix\norder as the default. HOWEVER, apply these overrides:\n\n  a) DIRECT FAILURE SIGNALS take precedence over structural issues.\n     Direct failure signals include:\n       - OOMKilled events\n       - image pull failures (ImagePullBackOff, ErrImagePull)\n       - scheduling failures (FailedScheduling, Insufficient CPU/memory)\n       - application-level crashes visible in logs\n       - CPU throttling / sustained CPU usage near limits\n\n     Structural issues (missing probes, incorrect probe timings)\n     should be reported but ranked SECOND when a direct failure\n     signal is present.\n\n  b) USER-REPORTED SYMPTOM should guide prioritization.\n     If the user asks \"why is X slow / under pressure / crashing?\"\n     put the fix that addresses THAT symptom first, even if\n     combined reasoning would otherwise rank another issue higher.\n\n  c) When you deviate from analyze_deployment's suggested order,\n     explain briefly why (e.g., \"Overriding combined reasoning\n     because the user reported CPU pressure and analyze_resources\n     confirms it, so patch_resources should come before patch_probes.\")\n\n-------------------------\nOUTPUT FORMAT\n-------------------------\n\nAfter analysis, return a structured diagnosis with these sections:\n\n  1. Problem: what is wrong (one sentence)\n  2. Root cause: why it is wrong, based on tool output\n  3. Recommended fix: the exact action and parameters\n     (e.g., \"patch_resources with cpu=150m, memory=256Mi\"\n      or \"update_image with newImage=nginx:1.25\")\n  4. Next step: tell the user to forward this diagnosis to the\n     Remediation Assistant (Workflow 3) for execution\n\n-------------------------\nSTRICT RULES\n-------------------------\n\n  - NEVER call execute_action. You do not have access to it.\n  - NEVER claim that you applied a fix.\n  - NEVER ask the user for approval to execute. That is the\n    Remediation Assistant's job.\n  - ALWAYS use the exact parameters returned by analyze_probes\n    (smartTuning.suggestedProbeConfig) and analyze_resources.\n    Do not invent values.\n  - NEVER recommend an action outside the SUPPORTED REMEDIATION\n    ACTIONS list above.\n  - If the user asks you to execute or apply a fix, reply that\n    this workflow only diagnoses, and suggest they pass the\n    diagnosis to the Remediation Assistant (Workflow 3).\n  - Be short, clear, and factual.\n\n-------------------------\nEXAMPLES\n-------------------------\n\nUser: \"why is t1-bad-image failing?\"\nAssistant: calls analyze_deployment with name=t1-bad-image\nAssistant returns:\n\n  Problem: ImagePullBackOff on deployment t1-bad-image.\n  Root cause: Kubernetes cannot pull image nginx:doesnotexist\n              (events show \"failed to pull image\").\n  Recommended fix: update_image with a valid image tag\n                   (e.g., nginx:1.25).\n  Next step: Forward this diagnosis to the Remediation Assistant\n             (Workflow 3) to apply the fix.\n\nUser: \"why is memory-hog failing?\"\nAssistant: calls analyze_deployment and get_pod_logs\nAssistant returns:\n\n  Problem: memory-hog is repeatedly OOMKilled.\n  Root cause: The container exceeds its memory limit; the\n              Linux OOM killer terminates it, and Kubernetes\n              restarts it in a loop. Probes are also missing\n              but that is a secondary observability gap.\n  Recommended fix: patch_resources — increase memory limit\n              above current value (direct failure signal\n              takes precedence over probes).\n  Next step: Forward this diagnosis to the Remediation Assistant.\n\nUser: \"why is db-client-app failing?\"\nAssistant: calls analyze_deployment, inspect_pods, get_pod_logs\nAssistant returns:\n\n  Problem: db-client-app exits at startup with a database\n           connection error.\n  Root cause: Pod logs show \"ECONNREFUSED 127.0.0.1:5432\";\n              the app is trying to reach a database on\n              localhost, which is unreachable from inside\n              a pod.\n  Recommended fix: This fix is outside the automated\n              remediation scope. The operator needs to\n              update the DATABASE_HOST environment variable\n              to point to a Kubernetes Service DNS name\n              (e.g., postgres.default.svc.cluster.local).\n              Example manual command:\n                kubectl -n default set env deployment/db-client-app \\\n                  DATABASE_HOST=postgres.default.svc.cluster.local\n  Next step: Forward this diagnosis to the Remediation Assistant\n             (Workflow 3). It cannot apply the env change directly,\n             but can verify deployment health after the manual fix.\n\nUser: \"please fix it\"\nAssistant: \"This workflow only diagnoses. Please pass the diagnosis\n            above to the Remediation Assistant (Workflow 3) which\n            can execute the fix after your approval.\""
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3.1,
+      "position": [
+        16,
+        0
+      ],
+      "id": "c71c1d8c-54ec-4081-aadd-bdcb335f9031",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "value": "gpt-5",
+          "mode": "list",
+          "cachedResultName": "gpt-5"
+        },
+        "builtInTools": {},
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1.3,
+      "position": [
+        -48,
+        224
+      ],
+      "id": "ecb9e543-2f7c-40fe-969d-1b0a9805e7bd",
+      "name": "OpenAI Chat Model",
+      "credentials": {
+        "openAiApi": {
+          "id": "BRWucxCGfgZaR5rX",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        80,
+        224
+      ],
+      "id": "5b46deb7-c057-409a-83c2-c2300071ec86",
+      "name": "Simple Memory"
+    },
+    {
+      "parameters": {
+        "endpointUrl": "http://192.168.49.1:3000/mcp",
+        "include": "selected",
+        "includeTools": [
+          "analyze_deployment",
+          "analyze_probes",
+          "analyze_resources",
+          "get_pod_logs",
+          "inspect_pods"
+        ],
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.mcpClientTool",
+      "typeVersion": 1.2,
+      "position": [
+        192,
+        224
+      ],
+      "id": "8ede79a4-cc7b-4210-a227-7baf4bf28247",
+      "name": "MCP Client"
+    },
+    {
+      "parameters": {
+        "message": "={{$node[\"AI Agent\"].json[\"output\"]}}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chat",
+      "typeVersion": 1.3,
+      "position": [
+        416,
+        0
+      ],
+      "id": "f3eae546-ed3b-4a77-bad7-d84deca91084",
+      "name": "Chat",
+      "webhookId": "374de247-f81e-485a-a65c-d8cb7798554e"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Chat Trigger": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OpenAI Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Simple Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "MCP Client": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Chat",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "497a2678-c95e-4402-b3d3-dacae5c78469",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "0028c737ddadd47eddc0cde24f79b52b8d9ecef96a995f689516546e20568075"
+  },
+  "nodeGroups": [],
+  "id": "jpAMO9kVJkukGSnV",
+  "tags": []
+}
